@@ -212,6 +212,29 @@ const addAssetToTree = (assets: Asset[], newAsset: Asset, parentPath: string): A
     });
 };
 
+// Helper function to update an asset's name in the tree immutably
+const updateAssetInTree = (assets: Asset[], assetId: string, newName: string): Asset[] => {
+    return assets.map(asset => {
+        if (asset.id === assetId) {
+            const oldName = asset.name;
+            const newPath = asset.path.substring(0, asset.path.length - oldName.length) + newName;
+            return {
+                ...asset,
+                name: newName,
+                path: newPath,
+            };
+        }
+        if (asset.children) {
+            return {
+                ...asset,
+                children: updateAssetInTree(asset.children, assetId, newName),
+            };
+        }
+        return asset;
+    });
+};
+
+
 // Helper function to ensure a folder path exists in the asset tree.
 const ensurePath = (assets: Asset[], pathParts: string[], parentPath: string): Asset[] => {
     if (pathParts.length === 0) return assets;
@@ -329,9 +352,6 @@ const createNewGameObject = (type: GameObjectType, position: Vector2, existingNa
           layer, 
           behaviors: [...baseObject.behaviors, spriteRendererBehavior, platformControllerBehavior],
           useCustomHitboxes: false,
-          animations: [
-              {id: `anim-idle-${newId}`, name: 'Idle', frames: [], loop: true, fps: 10}
-          ]
       };
     case 'background':
       const backgroundControllerBehavior = {
@@ -348,9 +368,6 @@ const createNewGameObject = (type: GameObjectType, position: Vector2, existingNa
           type, 
           layer, 
           behaviors: [...baseObject.behaviors, spriteRendererBehavior, backgroundControllerBehavior],
-          animations: [
-              {id: 'anim-idle', name: 'Idle', frames: [], loop: true, fps: 10}
-          ]
       };
     case 'player':
     case 'enemy':
@@ -360,11 +377,6 @@ const createNewGameObject = (type: GameObjectType, position: Vector2, existingNa
           type,
           layer, 
           behaviors: [...baseObject.behaviors, spriteRendererBehavior, scriptBehavior],
-          animations: [
-              {id: 'anim-idle', name: 'Idle', frames: [], loop: true, fps: 10}, 
-              {id: 'anim-run', name: 'Run', frames: [], loop: true, fps: 10},
-              {id: 'anim-jump', name: 'Jump', frames: [], loop: false, fps: 10}
-          ]
       };
     case 'bullet':
         const bulletSpriteRenderer = { type: 'spriteRenderer', name: 'Sprite Renderer', properties: { assetId: null, renderMode: 'normal' } };
@@ -746,10 +758,6 @@ const App: React.FC = () => {
         let newAssetsState = assets;
         if (type === 'player' || type === 'enemy') {
             const objectFolder: Asset = { id: `asset-${Date.now()}`, name: newObject.name, type: AssetType.Folder, path: `/Sprites/${newObject.name}`, children: [] };
-            const idleFolder: Asset = { id: `asset-${Date.now()}-idle`, name: 'Idle', type: AssetType.Folder, path: `/Sprites/${newObject.name}/Idle`, children: [] };
-            const runFolder: Asset = { id: `asset-${Date.now()}-run`, name: 'Run', type: AssetType.Folder, path: `/Sprites/${newObject.name}/Run`, children: [] };
-            const jumpFolder: Asset = { id: `asset-${Date.now()}-jump`, name: 'Jump', type: AssetType.Folder, path: `/Sprites/${newObject.name}/Jump`, children: [] };
-            objectFolder.children!.push(idleFolder, runFolder, jumpFolder);
             newAssetsState = addAssetToTree(newAssetsState, objectFolder, '/Sprites');
         }
         setAssets(newAssetsState);
@@ -799,13 +807,13 @@ const App: React.FC = () => {
 
 
     const handleSaveAnimations = useCallback((gameObjectId: string, animations: AnimationClip[]) => {
+        // Perform a deep copy as a robust safeguard against any potential shared references from the editor panel.
+        const animationsCopy = JSON.parse(JSON.stringify(animations));
         const targetGameObject = activeScene.gameObjects.find(go => go.id === gameObjectId);
         if (!targetGameObject) return;
 
         let currentAssets = assets;
-        // First, ensure all required animation folders exist in the asset tree.
-        animations.forEach(clip => {
-            // Only process clips that have new, unsaved frames to avoid creating empty folders needlessly.
+        animationsCopy.forEach(clip => {
             if (clip.frames.some(f => f.spriteSrc && !f.spriteAssetId)) {
                 const parentPath = `/Sprites/${targetGameObject.name}/${clip.name}`;
                 const pathParts = parentPath.split('/').filter(p => p);
@@ -816,16 +824,19 @@ const App: React.FC = () => {
             }
         });
 
-        const newAnimations = animations.map(clip => {
+        const newAnimations = animationsCopy.map(clip => {
             const newFrames = clip.frames.map((frame, index) => {
                 if (frame.spriteSrc && !frame.spriteAssetId) {
                     const parentPath = `/Sprites/${targetGameObject.name}/${clip.name}`;
-                    const newAssetName = `frame_${Date.now()}_${index}.png`;
+                    const newAssetName = frame.name || `frame_${Date.now()}_${index}.png`;
                     const newAsset: Asset = { id: `asset-${Date.now()}-${index}`, name: newAssetName, type: AssetType.Image, path: `${parentPath}/${newAssetName}`, data: frame.spriteSrc };
-                    currentAssets = addAssetToTree(currentAssets, newAsset, parentPath); // Path is now guaranteed to exist
-                    return { ...frame, spriteAssetId: newAsset.id, spriteSrc: undefined };
+                    currentAssets = addAssetToTree(currentAssets, newAsset, parentPath);
+                    
+                    const { spriteSrc, name, ...restOfFrame } = frame;
+                    return { ...restOfFrame, spriteAssetId: newAsset.id };
                 }
-                return frame;
+                const { name: tempName, ...restOfFrameWithoutTempName } = frame;
+                return restOfFrameWithoutTempName;
             });
             return { ...clip, frames: newFrames };
         });
@@ -835,6 +846,45 @@ const App: React.FC = () => {
         setEditingAnimationsFor(null);
     }, [assets, activeScene.gameObjects, setActiveScene]);
     
+    const handleUpdateAsset = useCallback((assetId: string, newNameWithoutExtension: string) => {
+        let assetToUpdate: Asset | null = null;
+        let parent: Asset | null = null;
+
+        function find(current: Asset, p: Asset | null): boolean {
+            if (current.id === assetId) {
+                assetToUpdate = current;
+                parent = p;
+                return true;
+            }
+            if (current.children) {
+                for (const child of current.children) {
+                    if (find(child, current)) return true;
+                }
+            }
+            return false;
+        }
+
+        find(assets[0], null);
+
+        if (!assetToUpdate || !parent || !parent.children) {
+            console.error("Could not find asset or its parent to rename.");
+            return;
+        }
+
+        const oldExtension = assetToUpdate.name.includes('.') ? assetToUpdate.name.split('.').pop() : '';
+        let finalNewName = newNameWithoutExtension;
+        if (oldExtension) {
+            finalNewName = `${newNameWithoutExtension}.${oldExtension}`;
+        }
+
+        if (parent.children.some(sibling => sibling.id !== assetId && sibling.name === finalNewName)) {
+            alert(`An asset with the name "${finalNewName}" already exists in this folder.`);
+            return;
+        }
+    
+        setAssets(currentAssets => updateAssetInTree(currentAssets, assetId, finalNewName));
+    }, [assets]);
+
     const onTextureAssigned = useCallback((gameObjectId: string, face: string, fileData: string, fileName: string) => {
         const newAsset: Asset = {
             id: `asset-tex-${Date.now()}`,
@@ -1313,7 +1363,7 @@ const App: React.FC = () => {
 
             {isShowingAddObjectModal && <AddObjectModal onClose={() => setIsShowingAddObjectModal(false)} onSelectObjectType={handleAddGameObject} />}
             {isShowingAddObjectModal3D && <AddObjectModal3D onClose={() => setIsShowingAddObjectModal3D(false)} onSelectEntityType={handleAddGameObject3D} />}
-            {editingAnimationsFor && <AnimationPanel gameObject={editingAnimationsFor} onClose={() => setEditingAnimationsFor(null)} onSave={handleSaveAnimations} assets={assets}/>}
+            {editingAnimationsFor && <AnimationPanel gameObject={editingAnimationsFor} onClose={() => setEditingAnimationsFor(null)} onSave={handleSaveAnimations} assets={assets} onUpdateAsset={handleUpdateAsset} />}
             {previewingScene && <GamePreviewWindow scene={previewingScene} assets={assets} onClose={stopPreview} resolution={resolution} simulatedObjects={liveSimObjects} cameraState={liveCameraState} isFullscreen={isPreviewFullscreen} showHitboxes={showHitboxes} onObjectClicked={(id) => { clickedObjectIdRef.current = id; }} />}
             <AIAssistant />
             {isProjectSettingsOpen && <ResolutionModal isEditing onClose={() => setIsProjectSettingsOpen(false)} initialName={projectName} initialResolution={resolution} initialStartFullscreen={startFullscreen} onConfirm={(res, name, type, startFs) => { setResolution(res); setProjectName(name); setStartFullscreen(startFs); setIsProjectSettingsOpen(false); }} />}
