@@ -229,6 +229,7 @@ export interface AnimationFrame {
   id: string;
   spriteAssetId: string; // From main assets
   spriteSrc?: string; // From local upload (base64 or virtual path)
+  name?: string; // For newly uploaded frames before they become assets
   hitboxes?: Hitbox[];
   spriteWidth?: number;
   spriteHeight?: number;
