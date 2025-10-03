@@ -14,6 +14,7 @@ interface AnimationPanelProps {
     onClose: () => void;
     onSave: (gameObjectId: string, animations: AnimationClip[]) => void;
     assets: Asset[];
+    onUpdateAsset: (assetId: string, newName: string) => void;
 }
 
 const ToggleSwitch: React.FC<{ checked: boolean; onChange: (checked: boolean) => void }> = ({ checked, onChange }) => (
@@ -31,6 +32,71 @@ const ToggleSwitch: React.FC<{ checked: boolean; onChange: (checked: boolean) =>
   </button>
 );
 
+const EditableText: React.FC<{
+  value: string;
+  onSave: (newValue: string) => void;
+}> = ({ value, onSave }) => {
+  const nameWithoutExtension = value.includes('.') ? value.substring(0, value.lastIndexOf('.')) : value;
+  const extension = value.includes('.') ? value.substring(value.lastIndexOf('.')) : '';
+  
+  const [isEditing, setIsEditing] = useState(false);
+  const [text, setText] = useState(nameWithoutExtension);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setText(nameWithoutExtension);
+  }, [value, nameWithoutExtension]);
+
+  useEffect(() => {
+    if (isEditing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [isEditing]);
+
+  const handleSave = () => {
+    const trimmedText = text.trim();
+    if (trimmedText && trimmedText !== nameWithoutExtension) {
+      onSave(trimmedText);
+    } else {
+      setText(nameWithoutExtension); // Revert
+    }
+    setIsEditing(false);
+  };
+
+  if (isEditing) {
+    return (
+      <div className="flex items-center">
+        <input
+          ref={inputRef}
+          type="text"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onBlur={handleSave}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') handleSave();
+            if (e.key === 'Escape') {
+              setText(nameWithoutExtension);
+              setIsEditing(false);
+            }
+          }}
+          className="w-full bg-gray-900 text-right text-xs p-0.5 rounded outline-none ring-1 ring-cyan-500"
+        />
+        <span className="text-xs text-gray-500 pl-0.5">{extension}</span>
+      </div>
+    );
+  }
+
+  return (
+    <span
+      onClick={() => setIsEditing(true)}
+      className="block w-full truncate cursor-pointer hover:bg-gray-600/50 p-0.5 rounded"
+      title={`Click to rename "${value}"`}
+    >
+      {value}
+    </span>
+  );
+};
 
 // Helper to find an asset by its ID recursively in the asset tree
 const findAssetById = (assets: Asset[], id: string): Asset | undefined => {
@@ -44,7 +110,7 @@ const findAssetById = (assets: Asset[], id: string): Asset | undefined => {
   return undefined;
 };
 
-const AnimationPanel: React.FC<AnimationPanelProps> = ({ gameObject, onClose, onSave, assets }) => {
+const AnimationPanel: React.FC<AnimationPanelProps> = ({ gameObject, onClose, onSave, assets, onUpdateAsset }) => {
     const [animations, setAnimations] = useState<AnimationClip[]>(JSON.parse(JSON.stringify(gameObject.animations || [])));
     const [selectedClipId, setSelectedClipId] = useState<string | null>(animations[0]?.id || null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -72,6 +138,37 @@ const AnimationPanel: React.FC<AnimationPanelProps> = ({ gameObject, onClose, on
         return undefined;
     };
     
+    const resolveSpriteAsset = (frame: AnimationFrame): Asset | undefined => {
+        if (frame.spriteAssetId) return findAssetById(assets, frame.spriteAssetId);
+        return undefined;
+    };
+
+    const handleRenameFrameAsset = (assetId: string, newName: string) => {
+        onUpdateAsset(assetId, newName);
+    };
+
+    const handleRenameNewFrame = (frameId: string, newName: string) => {
+        if (!selectedClipId) return;
+        setAnimations(anims =>
+            anims.map(clip => {
+                if (clip.id === selectedClipId) {
+                    return {
+                        ...clip,
+                        frames: clip.frames.map(frame => {
+                            if (frame.id === frameId) {
+                                const oldName = frame.name || '';
+                                const extension = oldName.includes('.') ? oldName.substring(oldName.lastIndexOf('.')) : '';
+                                return { ...frame, name: `${newName}${extension}` };
+                            }
+                            return frame;
+                        }),
+                    };
+                }
+                return clip;
+            })
+        );
+    };
+
     useEffect(() => {
         const container = previewContainerRef.current;
         if (!container) return;
@@ -167,29 +264,45 @@ const AnimationPanel: React.FC<AnimationPanelProps> = ({ gameObject, onClose, on
     const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
         if (!selectedClipId) return;
         const files = event.target.files;
-        if (!files) return;
-
-        // Fix: Refactored to use a standard for-loop to avoid a potential type inference issue with FileList.forEach.
-        for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                const dataUrl = e.target?.result as string;
-                const img = new Image();
-                img.onload = () => {
-                    const newFrame: AnimationFrame = {
-                        id: `frame-${Date.now()}-${Math.random()}`,
-                        spriteAssetId: '',
-                        spriteSrc: dataUrl,
-                        spriteWidth: img.naturalWidth,
-                        spriteHeight: img.naturalHeight,
+        if (!files || files.length === 0) return;
+    
+        const newFramePromises = Array.from(files).map(file => {
+            return new Promise<AnimationFrame>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = e => {
+                    const dataUrl = e.target?.result as string;
+                    const img = new Image();
+                    img.onload = () => {
+                        const newFrame: AnimationFrame = {
+                            id: `frame-${Date.now()}-${Math.random()}`,
+                            spriteAssetId: '',
+                            spriteSrc: dataUrl,
+                            name: file.name,
+                            spriteWidth: img.naturalWidth,
+                            spriteHeight: img.naturalHeight,
+                            hitboxes: [], 
+                        };
+                        resolve(newFrame);
                     };
-                    setAnimations(prev => prev.map(clip => clip.id === selectedClipId ? { ...clip, frames: [...clip.frames, newFrame] } : clip));
+                    img.onerror = reject;
+                    img.src = dataUrl;
                 };
-                img.src = dataUrl;
-            };
-            reader.readAsDataURL(file);
-        }
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+        });
+    
+        Promise.all(newFramePromises).then(newFrames => {
+            setAnimations(prevAnimations => 
+                prevAnimations.map(clip => 
+                    clip.id === selectedClipId 
+                        ? { ...clip, frames: [...clip.frames, ...newFrames] } 
+                        : clip
+                )
+            );
+        }).catch(err => {
+            console.error("Error processing uploaded files:", err);
+        });
         
         if (event.target) event.target.value = '';
     };
@@ -217,8 +330,8 @@ const AnimationPanel: React.FC<AnimationPanelProps> = ({ gameObject, onClose, on
                     const currentClip = c;
                     const frameToSyncFrom = currentClip.frames[previewFrame];
                     if (frameToSyncFrom) {
-                        const sourceHitboxes = JSON.parse(JSON.stringify(frameToSyncFrom.hitboxes || []));
-                        const syncedFrames = currentClip.frames.map(f => ({ ...f, hitboxes: sourceHitboxes }));
+                        const sourceHitboxes = frameToSyncFrom.hitboxes || [];
+                        const syncedFrames = currentClip.frames.map(f => ({ ...f, hitboxes: JSON.parse(JSON.stringify(sourceHitboxes)) }));
                         return { ...currentClip, syncHitboxes: true, frames: syncedFrames };
                     }
                     return { ...currentClip, syncHitboxes: true };
@@ -236,27 +349,21 @@ const AnimationPanel: React.FC<AnimationPanelProps> = ({ gameObject, onClose, on
         const newHitbox: Hitbox = { id: `hb-${Date.now()}`, name: 'hitbox', x: 0, y: 0, width: 32, height: 32 };
     
         setAnimations(anims => {
-            return anims.map(clip => {
-                if (clip.id === selectedClipId) {
-                    const frameToUpdate = clip.frames[previewFrame];
-                    if (!frameToUpdate) return clip;
-                    
-                    const newHitboxes = [...(frameToUpdate.hitboxes || []), newHitbox]; 
+            const newAnims = JSON.parse(JSON.stringify(anims));
+            const clipToUpdate = newAnims.find(clip => clip.id === selectedClipId);
+            if (!clipToUpdate) return anims;
     
-                    let updatedFrames;
-                    if (clip.syncHitboxes) {
-                        updatedFrames = clip.frames.map(f => ({ ...f, hitboxes: [...newHitboxes] }));
-                    } else {
-                        updatedFrames = clip.frames.map((frame, i) =>
-                            i === previewFrame
-                                ? { ...frame, hitboxes: newHitboxes }
-                                : frame
-                        );
-                    }
-                    return { ...clip, frames: updatedFrames };
-                }
-                return clip;
+            const framesToUpdate = clipToUpdate.syncHitboxes
+                ? clipToUpdate.frames
+                : [clipToUpdate.frames[previewFrame]].filter(Boolean);
+    
+            framesToUpdate.forEach(frame => {
+                if (!frame.hitboxes) frame.hitboxes = [];
+                // Add a unique copy for each frame to avoid reference issues, even if synced
+                frame.hitboxes.push(JSON.parse(JSON.stringify(newHitbox)));
             });
+    
+            return newAnims;
         });
     
         setSelectedHitboxId(newHitbox.id);
@@ -264,54 +371,47 @@ const AnimationPanel: React.FC<AnimationPanelProps> = ({ gameObject, onClose, on
 
     const handleDeleteHitbox = (hitboxId: string) => {
         if (!selectedClipId) return;
-        setAnimations(anims => anims.map(clip => {
-            if (clip.id === selectedClipId) {
-                const frameToUpdate = clip.frames[previewFrame];
-                if (!frameToUpdate) return clip;
-
-                const newHitboxes = frameToUpdate.hitboxes?.filter(hb => hb.id !== hitboxId);
-
-                let updatedFrames;
-                if (clip.syncHitboxes) {
-                    updatedFrames = clip.frames.map(f => ({ ...f, hitboxes: newHitboxes }));
-                } else {
-                     updatedFrames = clip.frames.map((frame, i) =>
-                        i === previewFrame ? { ...frame, hitboxes: newHitboxes } : frame
-                    );
+        setAnimations(anims => {
+            const newAnims = JSON.parse(JSON.stringify(anims));
+            const clipToUpdate = newAnims.find(clip => clip.id === selectedClipId);
+            if (!clipToUpdate) return anims;
+    
+            const framesToUpdate = clipToUpdate.syncHitboxes
+                ? clipToUpdate.frames
+                : [clipToUpdate.frames[previewFrame]].filter(Boolean);
+            
+            framesToUpdate.forEach(frame => {
+                if (frame.hitboxes) {
+                    frame.hitboxes = frame.hitboxes.filter(hb => hb.id !== hitboxId);
                 }
-                 return { ...clip, frames: updatedFrames };
-            }
-            return clip;
-        }));
+            });
+    
+            return newAnims;
+        });
         setSelectedHitboxId(null);
     };
 
     const handleHitboxPropChange = (prop: keyof Hitbox, value: any) => {
         if (!selectedHitboxId || !selectedClipId) return;
     
-        setAnimations(anims => anims.map(clip => {
-            if (clip.id === selectedClipId) {
-                const frameToUpdate = clip.frames[previewFrame];
-                if (!frameToUpdate) return clip;
+        setAnimations(anims => {
+            const newAnims = JSON.parse(JSON.stringify(anims));
+            const clipToUpdate = newAnims.find(clip => clip.id === selectedClipId);
+            if (!clipToUpdate) return anims;
     
-                const updatedHitboxes = frameToUpdate.hitboxes?.map(hb =>
-                    hb.id === selectedHitboxId ? { ...hb, [prop]: value } : hb
-                );
+            const framesToUpdate = clipToUpdate.syncHitboxes
+                ? clipToUpdate.frames
+                : [clipToUpdate.frames[previewFrame]].filter(Boolean);
     
-                if (!updatedHitboxes) return clip;
-    
-                let updatedFrames;
-                if (clip.syncHitboxes) {
-                    updatedFrames = clip.frames.map(f => ({ ...f, hitboxes: updatedHitboxes }));
-                } else {
-                    updatedFrames = clip.frames.map((frame, i) =>
-                        i === previewFrame ? { ...frame, hitboxes: updatedHitboxes } : frame
-                    );
+            framesToUpdate.forEach(frame => {
+                const hitboxToUpdate = frame.hitboxes?.find(hb => hb.id === selectedHitboxId);
+                if (hitboxToUpdate) {
+                    (hitboxToUpdate as any)[prop] = value;
                 }
-                return { ...clip, frames: updatedFrames };
-            }
-            return clip;
-        }));
+            });
+            
+            return newAnims;
+        });
     };
     
     const currentFrameSrc = currentFrame ? resolveSpriteSource(currentFrame) : undefined;
@@ -420,12 +520,32 @@ const AnimationPanel: React.FC<AnimationPanelProps> = ({ gameObject, onClose, on
                                     <button onClick={() => fileInputRef.current?.click()} disabled={!selectedClip} className="flex items-center space-x-1 text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded-md disabled:opacity-50"><UploadIcon className="w-3 h-3"/><span>Add Frames</span></button>
                                     <input type="file" ref={fileInputRef} onChange={handleFileUpload} multiple accept="image/*" className="hidden" />
                                 </div>
-                                <div className="flex-grow p-3 overflow-x-auto flex items-center space-x-2">
+                                <div className="flex-grow p-3 overflow-x-auto flex items-start space-x-2">
                                     {selectedClip?.frames.map((frame, index) => {
                                         const src = resolveSpriteSource(frame);
+                                        const asset = resolveSpriteAsset(frame);
                                         return src ? (
-                                            <div key={frame.id} className={`p-1 rounded-md flex-shrink-0 transition-all cursor-pointer ${previewFrame === index ? 'bg-cyan-500' : 'bg-black/20'}`} onClick={() => setPreviewFrame(index)}>
-                                                <img src={src} className="h-24 w-24 object-contain" alt={`Frame ${index}`} />
+                                            <div key={frame.id} className={`p-1 rounded-md flex-shrink-0 flex flex-col items-center space-y-1 transition-all ${previewFrame === index ? 'bg-cyan-500' : 'bg-black/20'}`}>
+                                                <div onClick={() => setPreviewFrame(index)} className="w-24 h-24 flex items-center justify-center cursor-pointer">
+                                                    <img src={src} className="max-w-full max-h-full object-contain" alt={asset?.name || frame.name || `Frame ${index}`} style={{ imageRendering: 'pixelated' }} />
+                                                </div>
+                                                {asset ? (
+                                                    <div className="w-24 text-center text-xs text-gray-300">
+                                                        <EditableText
+                                                            value={asset.name}
+                                                            onSave={(newName) => handleRenameFrameAsset(asset.id, newName)}
+                                                        />
+                                                    </div>
+                                                ) : frame.name ? (
+                                                    <div className="w-24 text-center text-xs text-gray-300">
+                                                        <EditableText
+                                                            value={frame.name}
+                                                            onSave={(newName) => handleRenameNewFrame(frame.id, newName)}
+                                                        />
+                                                    </div>
+                                                ) : (
+                                                    <div className="w-24 text-center text-xs text-gray-500 italic">Processing...</div>
+                                                )}
                                             </div>
                                         ) : null;
                                     })}
